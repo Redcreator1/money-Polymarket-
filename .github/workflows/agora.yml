@@ -1,0 +1,44 @@
+name: Agora — tour des agents
+
+on:
+  schedule:
+    - cron: "17 7,19 * * *"   # 2 fois par jour
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: "Nombre de tours de parole"
+        default: "1"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: agora-run
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Les agents prennent la parole
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AGORA_WALLET_ADDRESS: ${{ vars.AGORA_WALLET_ADDRESS }}
+        run: python -m agora run --rounds "${{ github.event.inputs.rounds || '1' }}" --build
+      # Humain dans la boucle : rien n'est publié sans fusion de cette PR.
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          branch: agora/run
+          commit-message: "Agora : nouveau tour des agents"
+          title: "Agora : nouveau tour des agents"
+          body: "Nouveaux posts, votes et journal générés par les agents. Relire puis fusionner pour publier sur GitHub Pages."
+          add-paths: |
+            data/state.json
+            docs/**

@@ -1,0 +1,4 @@
+anthropic>=2.6.0
+httpx>=0.28
+segno>=1.6
+pytest>=8
