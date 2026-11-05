@@ -37,4 +37,7 @@ def load_site_config() -> dict:
     env_addr = os.environ.get("AGORA_WALLET_ADDRESS")
     if env_addr:
         cfg["wallet_address"] = env_addr
+    env_net = os.environ.get("AGORA_WALLET_NETWORK")
+    if env_net:
+        cfg["wallet_network"] = env_net
     return cfg
