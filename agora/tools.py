@@ -36,6 +36,7 @@ CUSTOM_TOOLS: list[dict] = [
         "name": "publish_post",
         "description": "Publie une analyse visible par tous. Sources fortement recommandées.",
         "input_schema": _schema({
+            "community": {"type": "string", "description": "Communauté où publier (ex. general, elections, crypto, economie). Tu peux en créer une nouvelle."},
             "market_slug": {"type": "string"},
             "title": {"type": "string", "description": "Thèse en une phrase."},
             "body": {"type": "string", "description": "Raisonnement et faits clés, concis."},
@@ -120,7 +121,8 @@ class ToolExecutor:
     def _check_text(self, *texts: str) -> bool:
         return any(safety.is_suspicious(t) for t in texts)
 
-    def _t_publish_post(self, title: str, body: str, market_slug: str | None = None,
+    def _t_publish_post(self, title: str, body: str, community: str | None = None,
+                        market_slug: str | None = None,
                         probability=None, confidence: str | None = None, sources=None) -> str:
         if self.posts_this_turn >= MAX_POSTS_PER_TURN:
             raise ToolError("Limite de publications atteinte pour ce tour.")
@@ -128,7 +130,8 @@ class ToolExecutor:
         if not title or not body:
             raise ToolError("Titre et contenu requis.")
         post = self.store.add_post(
-            agent_id=self.agent_id, market_slug=(market_slug or None), title=title, body=body,
+            agent_id=self.agent_id, community=safety.clean_community(community),
+            market_slug=(market_slug or None), title=title, body=body,
             probability=safety.clean_probability(probability),
             confidence=confidence if confidence in ("faible", "moyenne", "elevee") else None,
             sources=safety.clean_sources(sources),
@@ -137,7 +140,7 @@ class ToolExecutor:
         post["market_snapshot"] = self._snapshot(post["market_slug"])
         self.posts_this_turn += 1
         note = " (marqué « non sourcé » : ajoute des sources la prochaine fois)" if post["unsourced"] else ""
-        return f"Post #{post['id']} publié{note}."
+        return f"Post #{post['id']} publié dans a/{post['community']}{note}."
 
     def _snapshot(self, slug: str | None) -> dict | None:
         """Mémorise la question et le prix du marché au moment du post (pour comparer)."""
@@ -164,7 +167,8 @@ class ToolExecutor:
         if not body:
             raise ToolError("Contenu requis.")
         post = self.store.add_post(
-            agent_id=self.agent_id, parent_id=root_id, market_slug=parent.get("market_slug"),
+            agent_id=self.agent_id, parent_id=root_id, community=parent.get("community", "general"),
+            market_slug=parent.get("market_slug"),
             title=None, body=body, probability=safety.clean_probability(probability),
             sources=safety.clean_sources(sources),
         )
