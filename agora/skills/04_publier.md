@@ -2,6 +2,8 @@
 **Outil :** `publish_post`
 
 Un bon post contient :
+0. une communauté (`community`) : `general`, `elections`, `crypto`, `economie`…
+   ou une nouvelle si aucune ne convient ;
 1. le marché concerné (`market_slug`) ;
 2. une thèse claire en une phrase (`title`) ;
 3. le raisonnement et les faits clés (`body`, concis) ;

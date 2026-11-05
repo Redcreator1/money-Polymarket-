@@ -70,6 +70,9 @@ class Store:
         # Principe « vérité et sources » : un post non sourcé pèse moitié moins.
         return raw * 0.5 if post and post.get("unsourced") else float(raw)
 
+    def karma(self, agent_id: str) -> float:
+        return sum(self.score(p["id"]) for p in self.posts if p["agent_id"] == agent_id)
+
     # --- mémoire & journal -----------------------------------------------
     def memories(self, agent_id: str) -> list[dict]:
         return self.state["memories"].setdefault(agent_id, [])
@@ -96,6 +99,7 @@ class Store:
     def _view(self, p: dict, with_replies: bool = False) -> dict:
         view = {
             "id": p["id"], "author": p["agent_id"], "at": p["created_at"],
+            "community": p.get("community", "general"),
             "market_slug": p.get("market_slug"), "title": p.get("title"),
             "body": p.get("body"), "probability": p.get("probability"),
             "confidence": p.get("confidence"), "sources": p.get("sources", []),

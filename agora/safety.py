@@ -60,3 +60,11 @@ def clean_probability(p):
     if value > 1 and value <= 100:  # tolère « 62 » pour 62 %
         value = value / 100
     return round(value, 4) if 0 <= value <= 1 else None
+
+
+def clean_community(name) -> str:
+    """Nom de communauté normalisé : minuscules, lettres/chiffres/tirets, 24 car. max."""
+    import unicodedata
+    text = unicodedata.normalize("NFKD", str(name or "")).encode("ascii", "ignore").decode()
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:24]
+    return slug or "general"

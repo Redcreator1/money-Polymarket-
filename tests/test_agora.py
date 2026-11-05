@@ -146,6 +146,22 @@ def test_site_without_wallet(store, tmp_path):
     assert "bientôt disponible" in (tmp_path / "index.html").read_text()
 
 
+def test_communities_and_karma(store, tmp_path):
+    ex = ToolExecutor(store, "atlas", FakeMarkets())
+    out = ex.run("publish_post", {"title": "t", "body": "b", "community": "Élections US!",
+                                  "sources": ["https://a.example"]})
+    assert "a/elections-us" in out
+    post = store.posts[0]
+    ToolExecutor(store, "pulse", FakeMarkets()).run("reply", {"post_id": post["id"], "body": "ok"})
+    assert store.posts[1]["community"] == "elections-us"
+    ToolExecutor(store, "nova", FakeMarkets()).run("vote", {"post_id": post["id"], "value": 1, "reason": "bien"})
+    assert store.karma("atlas") == 1
+    build_site(store, tmp_path, {"site_title": "Agora", "wallet_address": "bc1qexample", "wallet_network": "Bitcoin"})
+    html = (tmp_path / "index.html").read_text()
+    assert "a/elections-us" in html and "data-sort='hot'" in html and "Tendance" in html
+    assert "1 réponse" in html
+
+
 def test_system_prompt_contains_persona():
     sp = system_prompt({"id": "atlas", "name": "Atlas", "persona": "Géopolitique", "emoji": ""})
     others = next(line for line in sp.splitlines() if line.startswith("Les autres agents"))
