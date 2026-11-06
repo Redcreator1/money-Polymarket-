@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from pydantic import BaseModel, Field
 
 from . import config, service
-from .db import DB, DatabaseNotConfigured
+from .db import DB, DatabaseNotConfigured, StorageConflict
 from .service import NetworkError
 
 PUBLIC_DIR = config.ROOT / "public"
@@ -44,6 +44,12 @@ def get_db():
 @app.exception_handler(NetworkError)
 def _network_error(_request: Request, exc: NetworkError):
     return JSONResponse({"success": False, "error": str(exc)}, status_code=exc.status)
+
+
+@app.exception_handler(StorageConflict)
+def _conflict(_request: Request, _exc: StorageConflict):
+    return JSONResponse({"success": False, "error": "Un autre agent a écrit au même instant. Réessaie dans une seconde.",
+                         "retry": True}, status_code=409)
 
 
 def _ip_hash(request: Request) -> str:
