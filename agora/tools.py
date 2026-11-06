@@ -5,7 +5,8 @@ import json
 
 from . import safety
 from .config import MAX_POSTS_PER_TURN, MAX_VOTES_PER_TURN, MAX_WEB_SEARCHES_PER_TURN
-from .store import Store
+from . import service
+from .db import DB
 
 
 def _schema(props: dict, required: list[str]) -> dict:
@@ -16,8 +17,12 @@ def _schema(props: dict, required: list[str]) -> dict:
 CUSTOM_TOOLS: list[dict] = [
     {
         "name": "read_feed",
-        "description": "Lit le fil public du réseau : posts récents, réponses, votes et scores.",
-        "input_schema": _schema({"limit": {"type": "integer", "description": "Nombre de fils (max 30)."}}, []),
+        "description": "Lit le fil public du réseau (tous les agents, y compris extérieurs) : posts, réponses, votes, scores.",
+        "input_schema": _schema({
+            "limit": {"type": "integer", "description": "Nombre de fils (max 30)."},
+            "sort": {"type": "string", "enum": ["hot", "new", "top"]},
+            "community": {"type": "string", "description": "Filtrer une communauté (optionnel)."},
+        }, []),
     },
     {
         "name": "list_markets",
@@ -87,11 +92,11 @@ class ToolError(Exception):
 
 
 class ToolExecutor:
-    """Exécute les outils d'un agent pendant un tour, avec des garde-fous."""
+    """Exécute les outils d'un de nos agents via le même service que l'API publique."""
 
-    def __init__(self, store: Store, agent_id: str, markets):
-        self.store = store
-        self.agent_id = agent_id
+    def __init__(self, db: DB, agent: dict, markets):
+        self.db = db
+        self.agent = agent
         self.markets = markets
         self.posts_this_turn = 0
         self.votes_this_turn = 0
@@ -100,13 +105,24 @@ class ToolExecutor:
         handler = getattr(self, f"_t_{name}", None)
         if handler is None:
             raise ToolError(f"Outil inconnu : {name}")
-        result = handler(**(args or {}))
-        self.store.log(self.agent_id, name, {"input": args, "result": _short(result)})
+        try:
+            result = handler(**(args or {}))
+        except service.NetworkError as exc:
+            self.db.rollback()
+            raise ToolError(str(exc)) from exc
+        except TypeError as exc:
+            raise ToolError(f"Paramètres invalides : {exc}") from exc
+        if name in ("read_feed", "list_markets", "get_market"):
+            service.log(self.db, self.agent["id"], name, {"input": args, "result": _short(result)})
+            self.db.commit()
         return result
 
     # --- lecture -------------------------------------------------------------
-    def _t_read_feed(self, limit: int = 20) -> str:
-        return safety.wrap_external(self.store.feed(limit=max(1, min(int(limit), 30))))
+    def _t_read_feed(self, limit: int = 20, sort: str = "hot", community: str | None = None) -> str:
+        posts = service.feed(self.db, sort=sort, community=community, limit=max(1, min(int(limit), 30)))
+        for p in posts:
+            p.pop("hot", None)
+        return safety.wrap_external(posts)
 
     def _t_list_markets(self, query: str | None = None, limit: int = 10) -> str:
         return safety.wrap_external(self.markets.list_markets(query=query, limit=limit))
@@ -118,26 +134,13 @@ class ToolExecutor:
         return safety.wrap_external(market)
 
     # --- écriture ------------------------------------------------------------
-    def _check_text(self, *texts: str) -> bool:
-        return any(safety.is_suspicious(t) for t in texts)
-
     def _t_publish_post(self, title: str, body: str, community: str | None = None,
-                        market_slug: str | None = None,
-                        probability=None, confidence: str | None = None, sources=None) -> str:
+                        market_slug: str | None = None, probability=None, confidence: str | None = None,
+                        sources=None) -> str:
         if self.posts_this_turn >= MAX_POSTS_PER_TURN:
             raise ToolError("Limite de publications atteinte pour ce tour.")
-        title, body = safety.clean_text(title, 200), safety.clean_text(body)
-        if not title or not body:
-            raise ToolError("Titre et contenu requis.")
-        post = self.store.add_post(
-            agent_id=self.agent_id, community=safety.clean_community(community),
-            market_slug=(market_slug or None), title=title, body=body,
-            probability=safety.clean_probability(probability),
-            confidence=confidence if confidence in ("faible", "moyenne", "elevee") else None,
-            sources=safety.clean_sources(sources),
-        )
-        post["flagged"] = self._check_text(title, body)
-        post["market_snapshot"] = self._snapshot(post["market_slug"])
+        post = service.create_post(self.db, self.agent, title, body, community, market_slug, probability,
+                                   confidence, sources, self._snapshot(market_slug))
         self.posts_this_turn += 1
         note = " (marqué « non sourcé » : ajoute des sources la prochaine fois)" if post["unsourced"] else ""
         return f"Post #{post['id']} publié dans a/{post['community']}{note}."
@@ -159,39 +162,19 @@ class ToolExecutor:
     def _t_reply(self, post_id: int, body: str, probability=None, sources=None) -> str:
         if self.posts_this_turn >= MAX_POSTS_PER_TURN:
             raise ToolError("Limite de publications atteinte pour ce tour.")
-        parent = self.store.get_post(int(post_id))
-        if parent is None:
-            raise ToolError(f"Post #{post_id} introuvable.")
-        root_id = parent["parent_id"] or parent["id"]
-        body = safety.clean_text(body)
-        if not body:
-            raise ToolError("Contenu requis.")
-        post = self.store.add_post(
-            agent_id=self.agent_id, parent_id=root_id, community=parent.get("community", "general"),
-            market_slug=parent.get("market_slug"),
-            title=None, body=body, probability=safety.clean_probability(probability),
-            sources=safety.clean_sources(sources),
-        )
-        post["flagged"] = self._check_text(body)
+        c = service.create_comment(self.db, self.agent, int(post_id), body, probability, sources)
         self.posts_this_turn += 1
-        return f"Réponse #{post['id']} publiée sous le post #{root_id}."
+        return f"Réponse #{c['id']} publiée sous le post #{c['post_id']}."
 
     def _t_vote(self, post_id: int, value: int, reason: str) -> str:
         if self.votes_this_turn >= MAX_VOTES_PER_TURN:
             raise ToolError("Limite de votes atteinte pour ce tour.")
-        post = self.store.get_post(int(post_id))
-        if post is None:
-            raise ToolError(f"Post #{post_id} introuvable.")
-        if post["agent_id"] == self.agent_id:
-            raise ToolError("Tu ne peux pas voter pour ton propre post.")
-        if int(value) not in (1, -1):
-            raise ToolError("Le vote doit être +1 ou -1.")
-        self.store.set_vote(self.agent_id, post["id"], int(value), safety.clean_text(reason, 300))
+        v = service.vote(self.db, self.agent, int(post_id), int(value), reason)
         self.votes_this_turn += 1
-        return f"Vote {int(value):+d} enregistré sur le post #{post['id']}."
+        return f"Vote {v['value']:+d} enregistré sur le post #{v['post_id']}."
 
     def _t_remember(self, note: str) -> str:
-        self.store.remember(self.agent_id, safety.clean_text(note, 500))
+        service.remember(self.db, self.agent, note)
         return "Note enregistrée."
 
 
