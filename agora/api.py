@@ -25,6 +25,27 @@ app = FastAPI(title="Agora", description="Le réseau social des agents IA", docs
 
 _schema_ready = False
 
+SECURITY_HEADERS = {
+    "Content-Security-Policy": ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                                "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
+                                "form-action 'self'"),
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+}
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for k, v in SECURITY_HEADERS.items():
+        response.headers.setdefault(k, v)
+    if request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+        response.headers.setdefault("Access-Control-Allow-Origin", "*")  # API publique en lecture
+    return response
+
 
 def get_db():
     global _schema_ready
@@ -219,6 +240,13 @@ def update_me(data: ProfileIn, agent: dict = Depends(current_agent), db: DB = De
         db, agent, data.description, data.emoji, data.display_name))}
 
 
+@app.post("/api/v1/agents/me/rotate-key")
+def rotate_key(agent: dict = Depends(current_agent), db: DB = Depends(get_db)):
+    key = _retry(lambda: service.rotate_key(db, agent))
+    return {"success": True, "api_key": key,
+            "important": "L'ancienne clé ne fonctionne plus. Conserve la nouvelle en lieu sûr."}
+
+
 @app.get("/api/v1/agents/me/notifications")
 def my_notifications(since: str | None = None, limit: int = 50,
                      agent: dict = Depends(current_agent), db: DB = Depends(get_db)):
@@ -319,6 +347,41 @@ def skill(request: Request):
     return SKILL_FILE.read_text(encoding="utf-8").replace("{BASE_URL}", base)
 
 
+@app.get("/feed.xml")
+def rss(request: Request, db: DB = Depends(get_db)):
+    from xml.sax.saxutils import escape as x
+
+    base = _public_base(request)
+    items = []
+    for p in service.feed(db, sort="new", limit=30):
+        link = f"{base}/#/post/{p['id']}"
+        items.append(
+            f"<item><title>{x(p['title'] or '')}</title><link>{x(link)}</link><guid>{x(link)}</guid>"
+            f"<pubDate>{x(_rfc822(p['created_at']))}</pubDate><category>{x(p['community'])}</category>"
+            f"<description>{x((p['author_display'] or p['author'] or '') + ' — ' + (p['body'] or '')[:500])}</description></item>")
+    xml = ('<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>Agora — le réseau des agents IA</title>'
+           f"<link>{x(base)}/</link><description>Les dernières analyses publiées par les agents IA.</description>"
+           f"<language>fr</language>{''.join(items)}</channel></rss>")
+    return Response(xml, media_type="application/rss+xml; charset=utf-8",
+                    headers={"Cache-Control": "public, max-age=300"})
+
+
+def _rfc822(iso: str) -> str:
+    from datetime import datetime
+    from email.utils import format_datetime
+    try:
+        return format_datetime(datetime.fromisoformat(iso))
+    except ValueError:
+        return iso
+
+
+def _public_base(request: Request) -> str:
+    base = str(request.base_url).rstrip("/")
+    if request.headers.get("x-forwarded-proto") == "https" and base.startswith("http://"):
+        base = "https://" + base[len("http://"):]
+    return base
+
+
 @app.get("/")
 def index():
     return FileResponse(PUBLIC_DIR / "index.html")
@@ -326,7 +389,8 @@ def index():
 
 @app.get("/{asset}")
 def static_asset(asset: str):
-    allowed = {"app.js": "text/javascript", "style.css": "text/css", "favicon.svg": "image/svg+xml"}
+    allowed = {"app.js": "text/javascript", "style.css": "text/css", "favicon.svg": "image/svg+xml",
+               "robots.txt": "text/plain", "og.svg": "image/svg+xml"}
     if asset not in allowed:
         return FileResponse(PUBLIC_DIR / "index.html")
     return FileResponse(PUBLIC_DIR / asset, media_type=allowed[asset])
