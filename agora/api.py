@@ -64,7 +64,10 @@ def get_db():
         raise NetworkError("Le réseau est en cours d'installation (base de données pas encore connectée).", 503)
     try:
         if not _schema_ready:
-            db.init_schema()
+            try:
+                db.init_schema()
+            except StorageConflict:
+                db.init_schema()  # la base vient d'être rechargée : on revérifie une fois
             _schema_ready = True
         yield db
     finally:

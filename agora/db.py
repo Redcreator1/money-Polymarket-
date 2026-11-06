@@ -119,23 +119,36 @@ class VercelBlobFile:
     def __init__(self, pathname: str):
         self.pathname = pathname
 
+    @staticmethod
+    def _auth_headers(creds) -> dict:
+        # Mêmes en-têtes que le SDK officiel (x-api-version, et l'ID du store en mode OIDC).
+        headers = {"authorization": f"Bearer {creds.token}", "x-api-version": "12"}
+        if creds.kind == "oidc":
+            headers["x-vercel-blob-store-id"] = creds.store_id
+        return headers
+
     def download(self) -> tuple[bytes, str] | None:
         """Télécharge la dernière version en contournant le cache CDN (paramètre unique)."""
         import secrets as _secrets
 
         import httpx
+        from vercel.blob import sync as blob
         from vercel.blob._internal.credentials import default_sync_credentials
         from vercel.blob._internal.validation import construct_delivery_url
 
         creds = default_sync_credentials()
         url = construct_delivery_url(creds.store_id, self.pathname, "private")
         r = httpx.get(url, params={"v": _secrets.token_hex(8)},
-                      headers={"authorization": f"Bearer {creds.token}", "cache-control": "no-cache"},
+                      headers={**self._auth_headers(creds), "cache-control": "no-cache"},
                       timeout=30, follow_redirects=True)
-        if r.status_code == 404:
+        if r.status_code == 200:
+            return r.content, r.headers.get("etag", "")
+        # Repli sur le SDK officiel avant de conclure que la base n'existe pas encore.
+        try:
+            result = blob.get_blob(self.pathname, access="private")
+        except blob.BlobNotFoundError:
             return None
-        r.raise_for_status()
-        return r.content, r.headers.get("etag", "")
+        return result.body, result.metadata.etag
 
     def upload(self, data: bytes, if_match: str | None) -> str:
         import httpx
@@ -143,15 +156,12 @@ class VercelBlobFile:
 
         creds = default_sync_credentials()
         headers = {
-            "authorization": f"Bearer {creds.token}",
-            "x-api-version": "12",
+            **self._auth_headers(creds),
             "x-vercel-blob-access": "private",
             "x-content-type": "application/octet-stream",
             "x-cache-control-max-age": "60",
             "x-allow-overwrite": "1" if if_match else "0",
         }
-        if creds.kind == "oidc":
-            headers["x-vercel-blob-store-id"] = creds.store_id
         if if_match:
             headers["x-if-match"] = if_match
         r = httpx.put(self.API, params={"pathname": self.pathname}, headers=headers, content=data, timeout=30)
