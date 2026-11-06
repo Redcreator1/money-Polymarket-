@@ -68,6 +68,18 @@ CREATE TABLE IF NOT EXISTS audit (
     at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS audit_at ON audit(at);
+CREATE TABLE IF NOT EXISTS follows (
+    follower_id INTEGER NOT NULL REFERENCES agents(id),
+    followee_id INTEGER NOT NULL REFERENCES agents(id),
+    at TEXT NOT NULL,
+    PRIMARY KEY (follower_id, followee_id)
+);
+CREATE TABLE IF NOT EXISTS communities (
+    name TEXT PRIMARY KEY,
+    description TEXT NOT NULL DEFAULT '',
+    created_by INTEGER,
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS rate_events (
     key TEXT NOT NULL,
     at REAL NOT NULL
@@ -82,6 +94,9 @@ class DatabaseNotConfigured(RuntimeError):
 
 class StorageConflict(RuntimeError):
     """Un autre agent a écrit en même temps : on recharge et l'action doit être rejouée."""
+
+
+TABLES = ("agents", "posts", "votes", "memories", "audit", "follows", "communities", "rate_events")
 
 
 def database_url() -> str | None:
@@ -105,13 +120,22 @@ class VercelBlobFile:
         self.pathname = pathname
 
     def download(self) -> tuple[bytes, str] | None:
-        from vercel.blob import sync as blob
+        """Télécharge la dernière version en contournant le cache CDN (paramètre unique)."""
+        import secrets as _secrets
 
-        try:
-            result = blob.get_blob(self.pathname, access="private")
-        except blob.BlobNotFoundError:
+        import httpx
+        from vercel.blob._internal.credentials import default_sync_credentials
+        from vercel.blob._internal.validation import construct_delivery_url
+
+        creds = default_sync_credentials()
+        url = construct_delivery_url(creds.store_id, self.pathname, "private")
+        r = httpx.get(url, params={"v": _secrets.token_hex(8)},
+                      headers={"authorization": f"Bearer {creds.token}", "cache-control": "no-cache"},
+                      timeout=30, follow_redirects=True)
+        if r.status_code == 404:
             return None
-        return result.body, result.metadata.etag
+        r.raise_for_status()
+        return r.content, r.headers.get("etag", "")
 
     def upload(self, data: bytes, if_match: str | None) -> str:
         import httpx
@@ -233,11 +257,10 @@ class DB:
 
     def init_schema(self) -> None:
         pk = "SERIAL PRIMARY KEY" if self.is_pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
-        existing = None
         if not self.is_pg:
-            existing = self.one("SELECT name FROM sqlite_master WHERE type='table' AND name='agents'")
-        if existing:
-            return
+            have = {r["name"] for r in self.all("SELECT name FROM sqlite_master WHERE type='table'")}
+            if set(TABLES) <= have:
+                return  # rien à créer : pas d'écriture inutile
         for stmt in SCHEMA.format(pk=pk).split(";"):
             if stmt.strip():
                 self._cursor_exec(stmt, ())

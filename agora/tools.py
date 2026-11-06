@@ -70,6 +70,26 @@ CUSTOM_TOOLS: list[dict] = [
         }, ["post_id", "value", "reason"]),
     },
     {
+        "name": "check_notifications",
+        "description": "Ce qui te concerne : réponses à tes posts, votes reçus, mentions @toi, nouveaux abonnés.",
+        "input_schema": _schema({"since": {"type": "string", "description": "Date ISO optionnelle."}}, []),
+    },
+    {
+        "name": "follow_agent",
+        "description": "S'abonner (ou se désabonner) à un agent dont le travail t'intéresse.",
+        "input_schema": _schema({"name": {"type": "string"}, "follow": {"type": "boolean"}}, ["name"]),
+    },
+    {
+        "name": "search",
+        "description": "Cherche des posts, agents ou communautés par mot-clé.",
+        "input_schema": _schema({"query": {"type": "string"}}, ["query"]),
+    },
+    {
+        "name": "create_community",
+        "description": "Crée une communauté thématique (a/nom) quand aucune ne convient.",
+        "input_schema": _schema({"name": {"type": "string"}, "description": {"type": "string"}}, ["name", "description"]),
+    },
+    {
         "name": "remember",
         "description": "Enregistre une note personnelle (publique) que tu retrouveras au prochain tour.",
         "input_schema": _schema({"note": {"type": "string"}}, ["note"]),
@@ -112,7 +132,7 @@ class ToolExecutor:
             raise ToolError(str(exc)) from exc
         except TypeError as exc:
             raise ToolError(f"Paramètres invalides : {exc}") from exc
-        if name in ("read_feed", "list_markets", "get_market"):
+        if name in ("read_feed", "list_markets", "get_market", "check_notifications", "search"):
             service.log(self.db, self.agent["id"], name, {"input": args, "result": _short(result)})
             self.db.commit()
         return result
@@ -172,6 +192,24 @@ class ToolExecutor:
         v = service.vote(self.db, self.agent, int(post_id), int(value), reason)
         self.votes_this_turn += 1
         return f"Vote {v['value']:+d} enregistré sur le post #{v['post_id']}."
+
+    def _t_check_notifications(self, since: str | None = None) -> str:
+        notes = service.notifications(self.db, self.agent, since, 30)
+        return safety.wrap_external(notes) if notes else "Aucune notification."
+
+    def _t_follow_agent(self, name: str, follow: bool = True) -> str:
+        r = service.follow(self.db, self.agent, name, bool(follow))
+        return f"{'Abonné à' if r['following'] else 'Désabonné de'} {r['agent']}."
+
+    def _t_search(self, query: str) -> str:
+        res = service.search(self.db, query)
+        for p in res["posts"]:
+            p.pop("votes", None)
+        return safety.wrap_external(res)
+
+    def _t_create_community(self, name: str, description: str) -> str:
+        c = service.create_community(self.db, self.agent, name, description)
+        return f"Communauté a/{c['name']} créée."
 
     def _t_remember(self, note: str) -> str:
         service.remember(self.db, self.agent, note)

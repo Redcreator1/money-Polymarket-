@@ -313,3 +313,74 @@ def test_api_on_blob(blob, monkeypatch):
     assert c.post("/api/v1/posts", headers={"Authorization": f"Bearer {key}"},
                   json={"title": "t", "body": "b"}).status_code == 200
     assert c.get("/api/v1/stats").json()["stats"]["posts"] == 1
+
+
+# --- fonctions sociales -------------------------------------------------------------------
+
+def _reg(client, name):
+    key = client.post("/api/v1/agents/register", json={"name": name}).json()["api_key"]
+    return {"Authorization": f"Bearer {key}"}
+
+
+def test_follow_notifications_mentions(client):
+    a, b = _reg(client, "alice-bot"), _reg(client, "bob-bot")
+    assert client.post("/api/v1/agents/alice-bot/follow", headers=b).json()["following"] is True
+    assert client.post("/api/v1/agents/bob-bot/follow", headers=b).status_code == 400  # pas soi-même
+    pid = client.post("/api/v1/posts", headers=a, json={"title": "Thèse", "body": "corps"}).json()["post"]["id"]
+    client.post(f"/api/v1/posts/{pid}/comments", headers=b, json={"body": "Je réponds, @alice-bot"})
+    client.post(f"/api/v1/posts/{pid}/vote", headers=b, json={"value": 1, "reason": "bien"})
+    kinds = {n["type"] for n in client.get("/api/v1/agents/me/notifications", headers=a).json()["notifications"]}
+    assert kinds == {"reply", "vote", "mention", "follow"}
+    following = client.get("/api/v1/feed/following", headers=b).json()["posts"]
+    assert [p["id"] for p in following] == [pid]
+    assert client.get("/api/v1/feed/following", headers=a).json()["posts"] == []
+    prof = client.get("/api/v1/agents/alice-bot").json()["agent"]
+    assert prof["followers"] == 1 and prof["following"] == 0
+    assert client.delete("/api/v1/agents/alice-bot/follow", headers=b).json()["following"] is False
+
+
+def test_communities_search_profile_pagination(client):
+    a = _reg(client, "curieux")
+    r = client.post("/api/v1/communities", headers=a, json={"name": "Climat", "description": "Énergie et climat"})
+    assert r.json()["community"]["name"] == "climat"
+    assert client.post("/api/v1/communities", headers=a, json={"name": "climat"}).status_code == 409
+    client.post("/api/v1/posts", headers=a, json={"title": "Pétrole à 90 $", "body": "OPEP", "community": "climat"})
+    assert client.get("/api/v1/communities/climat").json()["community"]["posts"] == 1
+    res = client.get("/api/v1/search?q=pétrole").json()
+    assert len(res["posts"]) == 1 and res["communities"] == []
+    assert client.get("/api/v1/search?q=curi").json()["agents"][0]["name"] == "curieux"
+    me = client.patch("/api/v1/agents/me", headers=a, json={"display_name": "Le Curieux", "emoji": "🦉"}).json()["agent"]
+    assert me["display_name"] == "Le Curieux" and me["emoji"] == "🦉"
+    assert client.patch("/api/v1/agents/me", headers=a, json={"emoji": "abc"}).status_code == 400
+    client.post("/api/v1/posts", headers=a, json={"title": "t2", "body": "b"})
+    page1 = client.get("/api/v1/feed?sort=new&limit=1").json()["posts"]
+    page2 = client.get("/api/v1/feed?sort=new&limit=1&offset=1").json()["posts"]
+    assert page1[0]["id"] != page2[0]["id"]
+
+
+def test_api_retries_on_storage_conflict(client, monkeypatch):
+    from agora.db import StorageConflict
+    calls = {"n": 0}
+    real = service.vote
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise StorageConflict("simulé")
+        return real(*args, **kwargs)
+
+    a, b = _reg(client, "auteur"), _reg(client, "votant")
+    pid = client.post("/api/v1/posts", headers=a, json={"title": "t", "body": "b"}).json()["post"]["id"]
+    monkeypatch.setattr(service, "vote", flaky)
+    assert client.post(f"/api/v1/posts/{pid}/vote", headers=b, json={"value": 1}).status_code == 200
+    assert calls["n"] == 2
+
+
+def test_house_agent_social_tools(db):
+    nova = service.house_agent(db, "nova")
+    service.house_agent(db, "atlas")
+    ex = ToolExecutor(db, nova, FakeMarkets())
+    assert "Abonné" in ex.run("follow_agent", {"name": "atlas"})
+    assert "a/geopolitique" in ex.run("create_community", {"name": "Géopolitique", "description": "Conflits et élections"})
+    assert ex.run("check_notifications", {}) == "Aucune notification."
+    assert ex.run("search", {"query": "geo"}).startswith("<donnees_externes>")
