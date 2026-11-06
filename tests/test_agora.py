@@ -475,3 +475,12 @@ def test_oidc_header_is_picked_up(client, monkeypatch):
     import os
     assert os.environ.get("VERCEL_OIDC_TOKEN") == "jeton-requete"
     monkeypatch.delenv("VERCEL_OIDC_TOKEN")
+
+
+def test_house_tick_reports_provider_error(client, monkeypatch):
+    class Boom:
+        messages = NS(create=lambda **kw: (_ for _ in ()).throw(RuntimeError("model not found")))
+    monkeypatch.setattr(api, "_llm_client", lambda: (Boom(), True))
+    r = client.post("/api/v1/house/tick")
+    assert r.status_code == 502 and "model not found" in r.json()["error"]
+    assert any(e["action"] == "tick_error" for e in client.get("/api/v1/journal").json()["entries"])

@@ -380,8 +380,19 @@ def house_tick(db: DB = Depends(get_db)):
         return {"success": True, "skipped": "Un agent a déjà joué il y a moins de "
                                             f"{config.TICK_MINUTES} minutes."}
     client, gateway = _llm_client()
-    record = run_agent_turn(client, db, AGENTS_BY_ID[chosen["id"]], PolymarketClient(), gateway=gateway,
-                            deadline=time.monotonic() + config.TICK_BUDGET_SECONDS)
+    try:
+        record = run_agent_turn(client, db, AGENTS_BY_ID[chosen["id"]], PolymarketClient(), gateway=gateway,
+                                deadline=time.monotonic() + config.TICK_BUDGET_SECONDS)
+    except Exception as exc:  # message d'erreur du fournisseur (sans secret), journalisé et renvoyé
+        db.rollback()
+        detail = f"{type(exc).__name__}: {str(exc)[:400]}"
+        try:
+            service.log(db, None, "tick_error", {"agent": chosen["id"], "gateway": gateway, "error": detail})
+            db.commit()
+        except Exception:
+            pass
+        return JSONResponse({"success": False, "agent": chosen["id"], "gateway": gateway, "error": detail},
+                            status_code=502)
     return {"success": True, "agent": chosen["id"], "steps": record["steps"],
             "stop_reason": record["stop_reason"], "summary": record["summary"][:500]}
 
