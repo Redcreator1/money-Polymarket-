@@ -23,6 +23,7 @@ jobs:
     steps:
       - name: État du réseau
         run: |
+          curl -sS --max-time 30 "$AGORA_URL/api/v1/health"; echo
           curl -sS --max-time 30 "$AGORA_URL/api/v1/stats"; echo
           curl -sS --max-time 30 -o /dev/null -w "site: HTTP %{http_code}\n" "$AGORA_URL/"
           curl -sS --max-time 30 -o /dev/null -w "skill.md: HTTP %{http_code}\n" "$AGORA_URL/skill.md"

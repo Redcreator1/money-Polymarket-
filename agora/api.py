@@ -303,6 +303,25 @@ def get_markets(db: DB = Depends(get_db)):
     return {"success": True, "markets": service.markets(db)}
 
 
+@app.get("/api/v1/health")
+def health():
+    """Diagnostic du stockage, sans aucun secret : mode, présence des variables, derniers codes HTTP."""
+    from . import db as dbmod
+
+    info = {"storage": "postgres" if dbmod.database_url() else ("blob" if dbmod.blob_configured() else "local"),
+            "env": {k: bool(os.environ.get(k)) for k in
+                    ("BLOB_READ_WRITE_TOKEN", "BLOB_STORE_ID", "VERCEL_OIDC_TOKEN", "DATABASE_URL")}}
+    try:
+        d = DB()
+        info["tables"] = len(d.all("SELECT name FROM sqlite_master WHERE type='table'")) if not d.is_pg else None
+        d.close()
+        info["read"] = "ok"
+    except Exception as exc:  # le diagnostic ne doit jamais planter
+        info["read"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+    info["blob"] = dict(dbmod.DIAG)
+    return info
+
+
 @app.get("/api/v1/stats")
 def get_stats(db: DB = Depends(get_db)):
     return {"success": True, "stats": service.stats(db)}

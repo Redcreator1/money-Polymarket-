@@ -113,6 +113,9 @@ def blob_configured() -> bool:
 # (en-tête x-if-match) : si un autre agent a écrit entre-temps, l'écriture est refusée,
 # on recharge la dernière version et l'action est rejouée. Aucune donnée n'est écrasée.
 
+DIAG: dict = {}  # derniers échanges avec Blob (codes HTTP, jamais de secret) pour /api/v1/health
+
+
 class VercelBlobFile:
     API = "https://vercel.com/api/blob"
 
@@ -127,8 +130,17 @@ class VercelBlobFile:
             headers["x-vercel-blob-store-id"] = creds.store_id
         return headers
 
+    def _head_etag(self) -> str | None:
+        """Empreinte de référence, donnée par l'API Blob (et non par le CDN)."""
+        from vercel.blob import sync as blob
+
+        try:
+            return blob.head_blob(self.pathname).etag
+        except blob.BlobNotFoundError:
+            return None
+
     def download(self) -> tuple[bytes, str] | None:
-        """Télécharge la dernière version en contournant le cache CDN (paramètre unique)."""
+        """Dernière version + son empreinte API. L'empreinte est relue après coup pour éviter un mélange."""
         import secrets as _secrets
 
         import httpx
@@ -136,19 +148,23 @@ class VercelBlobFile:
         from vercel.blob._internal.credentials import default_sync_credentials
         from vercel.blob._internal.validation import construct_delivery_url
 
-        creds = default_sync_credentials()
-        url = construct_delivery_url(creds.store_id, self.pathname, "private")
-        r = httpx.get(url, params={"v": _secrets.token_hex(8)},
-                      headers={**self._auth_headers(creds), "cache-control": "no-cache"},
-                      timeout=30, follow_redirects=True)
-        if r.status_code == 200:
-            return r.content, r.headers.get("etag", "")
-        # Repli sur le SDK officiel avant de conclure que la base n'existe pas encore.
-        try:
-            result = blob.get_blob(self.pathname, access="private")
-        except blob.BlobNotFoundError:
-            return None
-        return result.body, result.metadata.etag
+        for _ in range(3):
+            before = self._head_etag()
+            DIAG["head_etag"] = before
+            if before is None:
+                DIAG["download"] = "absent"
+                return None
+            creds = default_sync_credentials()
+            DIAG["credentials"] = creds.kind
+            url = construct_delivery_url(creds.store_id, self.pathname, "private")
+            r = httpx.get(url, params={"v": _secrets.token_hex(8)},
+                          headers={**self._auth_headers(creds), "cache-control": "no-cache"},
+                          timeout=30, follow_redirects=True)
+            DIAG["download"] = f"HTTP {r.status_code}"
+            body = r.content if r.status_code == 200 else blob.get_blob(self.pathname, access="private").body
+            if self._head_etag() == before:  # rien n'a changé pendant le téléchargement
+                return body, before
+        raise StorageConflict("la base change trop vite")
 
     def upload(self, data: bytes, if_match: str | None) -> str:
         import httpx
@@ -165,6 +181,7 @@ class VercelBlobFile:
         if if_match:
             headers["x-if-match"] = if_match
         r = httpx.put(self.API, params={"pathname": self.pathname}, headers=headers, content=data, timeout=30)
+        DIAG["upload"] = f"HTTP {r.status_code}" + ("" if r.is_success else f" {r.text[:200]}")
         if r.status_code in (409, 412):
             raise StorageConflict(r.text[:200])
         if r.status_code == 400 and "exist" in r.text.lower():
