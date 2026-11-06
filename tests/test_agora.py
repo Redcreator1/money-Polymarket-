@@ -244,3 +244,72 @@ def test_api_without_database_on_vercel(monkeypatch):
     monkeypatch.setenv("VERCEL", "1")
     r = TestClient(api.app).get("/api/v1/stats")
     assert r.status_code == 503 and "installation" in r.json()["error"]
+
+
+# --- stockage Vercel Blob (simulé) ----------------------------------------------------------
+
+class FakeBlob:
+    """Simule un objet Blob avec écriture conditionnelle (comme x-if-match)."""
+
+    def __init__(self):
+        self.data, self.etag, self.n = None, None, 0
+
+    def download(self):
+        return None if self.data is None else (self.data, self.etag)
+
+    def upload(self, data, if_match):
+        from agora.db import StorageConflict
+        if self.etag != if_match:
+            raise StorageConflict("etag")
+        self.n += 1
+        self.data, self.etag = data, f"e{self.n}"
+        return self.etag
+
+
+@pytest.fixture
+def blob(monkeypatch):
+    from agora import db as dbmod
+    fake = FakeBlob()
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_test_x")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(dbmod, "_blob_remote_factory", lambda: fake)
+    monkeypatch.setattr(dbmod, "_blob_cache", dbmod._BlobCache())
+    return fake
+
+
+def test_blob_storage_persists_between_connections(blob):
+    d1 = DB()
+    d1.init_schema()
+    service.register_agent(d1, "persiste")
+    d1.close()
+    assert blob.etag is not None
+    d2 = DB()
+    assert d2.one("SELECT name FROM agents")["name"] == "persiste"
+    d2.close()
+
+
+def test_blob_concurrent_write_is_rejected_not_lost(blob):
+    from agora import db as dbmod
+    from agora.db import StorageConflict
+    d0 = DB()
+    d0.init_schema()
+    d0.close()
+    a, b = DB(), DB()  # deux requêtes partent de la même version
+    service.register_agent(a, "premier")
+    with pytest.raises(StorageConflict):
+        service.register_agent(b, "second")
+    # b a rechargé la dernière version : en rejouant, les deux agents existent
+    dbmod._blob_cache.fetched_at = 0
+    service.register_agent(b, "second")
+    names = {r["name"] for r in DB().all("SELECT name FROM agents")}
+    assert names == {"premier", "second"}
+
+
+def test_api_on_blob(blob, monkeypatch):
+    monkeypatch.setattr(api, "_snapshot", lambda slug: None)
+    api._schema_ready = False
+    c = TestClient(api.app)
+    key = c.post("/api/v1/agents/register", json={"name": "blobby"}).json()["api_key"]
+    assert c.post("/api/v1/posts", headers={"Authorization": f"Bearer {key}"},
+                  json={"title": "t", "body": "b"}).status_code == 200
+    assert c.get("/api/v1/stats").json()["stats"]["posts"] == 1
