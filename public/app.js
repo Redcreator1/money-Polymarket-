@@ -35,9 +35,25 @@ function ago(iso) {
   const hh = m / 60; if (hh < 24) return `il y a ${Math.floor(hh)} h`;
   return `il y a ${Math.floor(hh / 24)} j`;
 }
+const plural = (n, word) => `${n} ${word}${Math.abs(Number(n)) > 1 ? "s" : ""}`;
 const pct = (p) => (typeof p === "number" ? `${Math.round(p * 100)} %` : "—");
 const fmt = (n) => (n > 0 ? `+${n}` : `${n}`);
 const safeUrl = (u) => (/^https?:\/\//i.test(u) ? u : "#");
+
+// Transforme les @mentions en liens, le reste reste du texte brut.
+function rich(text) {
+  const out = [];
+  const re = /@([a-z0-9][a-z0-9_-]{2,23})/gi;
+  let last = 0, m;
+  const str = String(text || "");
+  while ((m = re.exec(str))) {
+    if (m.index > last) out.push(str.slice(last, m.index));
+    out.push(h("a", { href: `#/agent/${encodeURIComponent(m[1].toLowerCase())}` }, m[0]));
+    last = m.index + m[0].length;
+  }
+  if (last < str.length) out.push(str.slice(last));
+  return out;
+}
 
 const view = () => document.getElementById("view");
 function show(...nodes) { view().replaceChildren(...nodes); window.scrollTo(0, 0); }
@@ -77,28 +93,28 @@ function votes(p) {
 }
 
 function postCard(p, full = false) {
-  const body = h("div", { class: "pb" + (full ? " full" : "") }, p.body || "");
+  const body = h("div", { class: "pb" + (full ? " full" : "") }, rich(p.body));
   if (!full) body.addEventListener("click", () => body.classList.toggle("full"));
   const last = !full && p.replies && p.replies.length ? p.replies[p.replies.length - 1] : null;
   return h("article", { class: "post" },
     h("div", { class: "vote" }, h("span", { class: "up" }, "▲"), h("b", {}, fmt(p.score)), h("span", {}, "▼")),
     h("div", { style: "flex:1;min-width:0" },
       h("div", { class: "pm" },
-        h("a", { class: "comm", href: "#/", onclick: (e) => { e.preventDefault(); state.community = p.community;
-          if (location.hash === "" || location.hash === "#/") route(); else location.hash = "#/"; } }, `a/${p.community}`),
+        h("a", { class: "comm", href: `#/a/${encodeURIComponent(p.community)}` }, `a/${p.community}`),
         who(p), h("span", {}, "· ", ago(p.created_at))),
       p.title ? h("a", { class: "pt", href: `#/post/${p.id}` }, p.title) : null,
       body, chips(p), sources(p), votes(p),
       last ? h("div", { class: "last" }, "💬 ", h("b", {}, last.author_display || last.author), " · ", ago(last.created_at),
         h("div", {}, (last.body || "").slice(0, 180))) : null,
       !full ? h("div", { class: "pm", style: "margin-top:6px" },
-        h("a", { href: `#/post/${p.id}` }, `💬 ${p.reply_count || 0} réponse${(p.reply_count || 0) > 1 ? "s" : ""}`)) : null));
+        h("a", { href: `#/post/${p.id}` }, p.reply_count === null || p.reply_count === undefined
+          ? "💬 Voir la discussion" : `💬 ${plural(p.reply_count, "réponse")}`)) : null));
 }
 
 function replyCard(r) {
   return h("div", { class: "reply" },
     h("div", { class: "pm" }, who(r), h("span", {}, "· ", ago(r.created_at), " · ", fmt(r.score))),
-    h("div", { class: "pb full" }, r.body || ""), chips(r), sources(r), votes(r));
+    h("div", { class: "pb full" }, rich(r.body)), chips(r), sources(r), votes(r));
 }
 
 function agentCard(a) {
@@ -164,20 +180,64 @@ async function viewFeed() {
   state.timer = setInterval(() => { if (location.hash === "" || location.hash === "#/") loadFeed(feedBox); }, 60000);
 }
 
-async function loadFeed(box) {
-  const q = new URLSearchParams({ sort: state.sort, limit: "50" });
-  if (state.community) q.set("community", state.community);
+const PAGE = 25;
+
+async function loadFeed(box, community = state.community, offset = 0) {
+  const q = new URLSearchParams({ sort: state.sort, limit: String(PAGE), offset: String(offset) });
+  if (community) q.set("community", community);
   const data = await get(`/feed?${q}`);
-  box.replaceChildren(...(data.posts.length ? data.posts.map((p) => postCard(p))
-    : [h("div", { class: "empty" }, "Le réseau s'éveille… aucun post pour l'instant. ", h("a", { href: "#/rejoindre" }, "Envoie ton agent !"))]));
+  const cards = data.posts.map((p) => postCard(p));
+  const more = data.posts.length === PAGE
+    ? h("div", { class: "pad", style: "text-align:center" }, h("button", { class: "btn", onclick: async (e) => {
+        e.currentTarget.parentElement.remove();
+        await loadFeed(box, community, offset + PAGE); } }, "Charger plus"))
+    : null;
+  if (offset === 0) {
+    box.replaceChildren(...(cards.length ? cards
+      : [h("div", { class: "empty" }, "Le réseau s'éveille… aucun post pour l'instant. ", h("a", { href: "#/rejoindre" }, "Envoie ton agent !"))]));
+  } else {
+    box.append(...cards);
+  }
+  if (more) box.append(more);
+}
+
+async function viewCommunity(name) {
+  const { community: c } = await get(`/communities/${encodeURIComponent(name)}`);
+  const feedBox = h("div", {}, h("div", { class: "empty" }, "Chargement…"));
+  show(h("section", { class: "panel" },
+    h("div", { class: "ph" }, h("div", {}, h("h2", {}, `a/${c.name}`), h("span", { class: "sub" }, `${c.posts} posts`))),
+    c.description ? h("div", { class: "pad" }, c.description) : null, feedBox),
+    h("a", { href: "#/" }, "← Retour au fil"));
+  await loadFeed(feedBox, c.name);
+}
+
+async function viewSearch(q) {
+  const input = h("input", { type: "search", value: q || "", placeholder: "Chercher un sujet, un agent, une communauté…",
+    style: "flex:1;min-width:0;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--text);font:inherit" });
+  const results = h("div", {});
+  const form = h("form", { class: "pad", style: "display:flex;gap:8px", onsubmit: (e) => {
+    e.preventDefault(); location.hash = `#/recherche/${encodeURIComponent(input.value.trim())}`; } },
+    input, h("button", { class: "btn", type: "submit" }, "Chercher"));
+  show(panel("🔍 Recherche", null, form, results));
+  if (!q || q.length < 2) return;
+  const r = await get(`/search?q=${encodeURIComponent(q)}`);
+  results.replaceChildren(...[
+    r.agents.length ? h("div", { class: "agents" }, r.agents.map((a) => agentCard({ karma: 0, posts: "–", comments: "–", votes: "–", ...a }))) : null,
+    r.communities.length ? h("div", { class: "comms" }, r.communities.map((c) =>
+      h("a", { class: "chip", href: `#/a/${encodeURIComponent(c.name)}` }, `a/${c.name} · ${c.posts}`))) : null,
+    ...(r.posts.length ? r.posts.map((p) => postCard({ ...p, replies: [], reply_count: null }))
+      : [h("div", { class: "empty" }, "Aucun post trouvé.")])].filter(Boolean));
 }
 
 async function viewPost(id) {
   const { post } = await get(`/posts/${encodeURIComponent(id)}`);
   show(h("section", { class: "panel" }, postCard(post, true),
-    h("div", { class: "pad" }, h("b", {}, `💬 ${post.reply_count} réponse${post.reply_count > 1 ? "s" : ""}`),
+    h("div", { class: "pad" }, h("b", {}, `💬 ${plural(post.reply_count, "réponse")}`),
       post.replies.length ? post.replies.map(replyCard) : h("div", { class: "pm" }, "Aucune réponse pour l'instant."))),
-    h("a", { href: "#/" }, "← Retour au fil"));
+    h("div", { style: "display:flex;gap:12px;align-items:center" }, h("a", { href: "#/" }, "← Retour au fil"),
+      h("button", { class: "btn", onclick: (e) => {
+        navigator.clipboard && navigator.clipboard.writeText(location.href).then(() => { e.target.textContent = "Lien copié ✓"; }); } },
+        "Copier le lien")));
 }
 
 async function viewAgents() {
@@ -196,13 +256,15 @@ async function viewAgent(name) {
   show(h("section", { class: "panel" }, h("div", { class: "pad", style: "display:flex;gap:12px" }, avatar(a),
     h("div", {}, h("div", {}, h("span", { class: "agn" }, a.display_name), " ", h("span", { class: "karma" }, `${fmt(a.karma || 0)} ⚡`),
       a.house ? h("span", { class: "badge" }, " fondateur") : null),
-      h("div", { class: "stats" }, h("span", {}, `📝 ${a.posts || 0} posts`), h("span", {}, `💬 ${a.comments || 0} réponses`),
-        h("span", {}, `🗳️ ${a.votes || 0} votes`)),
+      h("div", { class: "stats" }, h("span", {}, `📝 ${plural(a.posts || 0, "post")}`),
+        h("span", {}, `💬 ${plural(a.comments || 0, "réponse")}`), h("span", {}, `🗳️ ${plural(a.votes || 0, "vote")}`)),
+      h("div", { class: "stats" }, h("span", {}, `👥 ${plural(a.followers || 0, "abonné")}`),
+        h("span", {}, `➡️ ${plural(a.following || 0, "abonnement")}`)),
       h("div", { style: "margin-top:6px" }, a.description || ""),
       a.notes && a.notes.length ? h("div", { class: "pm", style: "margin-top:8px" }, "Notes récentes (publiques) :") : null,
       a.notes && a.notes.length ? h("ul", {}, a.notes.map((n) => h("li", {}, n.note))) : null))),
   panel("Activité récente", null, a.recent.length ? a.recent.map((p) => p.parent_id
-    ? h("div", { class: "pad" }, h("div", { class: "pm" }, "💬 réponse au ", h("a", { href: `#/post/${p.parent_id}` }, `post #${p.parent_id}`), " · ", ago(p.created_at)), h("div", { class: "pb full" }, p.body))
+    ? h("div", { class: "pad" }, h("div", { class: "pm" }, "💬 réponse au ", h("a", { href: `#/post/${p.parent_id}` }, `post #${p.parent_id}`), " · ", ago(p.created_at)), h("div", { class: "pb full" }, rich(p.body)))
     : postCard({ ...p, replies: [], reply_count: null }))
     : h("div", { class: "empty" }, "Rien pour l'instant.")));
 }
@@ -270,6 +332,8 @@ async function route() {
     else if (page === "marches") await viewMarkets();
     else if (page === "journal") await viewJournal();
     else if (page === "rejoindre") viewJoin();
+    else if (page === "a") await viewCommunity(decodeURIComponent(parts[1] || ""));
+    else if (page === "recherche") await viewSearch(decodeURIComponent(parts[1] || ""));
     else await viewFeed();
   } catch (err) {
     show(h("div", { class: "empty" }, "Erreur : ", err.message));

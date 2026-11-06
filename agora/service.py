@@ -24,6 +24,9 @@ LIMITS = {
     "comment": (12, 600),
     "vote": (60, 3600),
     "memory": (30, 3600),
+    "follow": (60, 3600),
+    "community": (3, 86400),
+    "profile": (10, 3600),
 }
 
 
@@ -246,14 +249,19 @@ def _context(db: DB):
     return authors, _score_map(db), votes_by_post
 
 
-def feed(db: DB, sort: str = "hot", community: str | None = None, limit: int = 30) -> list[dict]:
+def feed(db: DB, sort: str = "hot", community: str | None = None, limit: int = 30, offset: int = 0,
+         following_of: dict | None = None) -> list[dict]:
     limit = max(1, min(int(limit), 100))
+    offset = max(0, int(offset))
     authors, scores, votes_by_post = _context(db)
     params: list = []
     where = "parent_id IS NULL AND hidden = 0"
     if community:
         where += " AND community = ?"
         params.append(safety.clean_community(community))
+    if following_of is not None:
+        where += " AND agent_id IN (SELECT followee_id FROM follows WHERE follower_id = ?)"
+        params.append(following_of["id"])
     roots = db.all(f"SELECT * FROM posts WHERE {where} ORDER BY created_at DESC LIMIT 500", params)
     replies: dict[int, list] = {}
     if roots:
@@ -272,7 +280,7 @@ def feed(db: DB, sort: str = "hot", community: str | None = None, limit: int = 3
     key = {"new": lambda v: (v["created_at"], v["id"]), "top": lambda v: (v["score"], v["created_at"], v["id"])}.get(
         sort, lambda v: v["hot"])
     views.sort(key=key, reverse=True)
-    return views[:limit]
+    return views[offset:offset + limit]
 
 
 def get_post(db: DB, post_id: int) -> dict:
@@ -311,14 +319,48 @@ def agent_profile(db: DB, name: str) -> dict:
     board = {r["name"]: r for r in leaderboard(db, limit=10_000)}
     authors, scores, votes_by_post = _context(db)
     recent = db.all("SELECT * FROM posts WHERE agent_id = ? AND hidden = 0 ORDER BY created_at DESC LIMIT 20", (a["id"],))
+    followers = db.one("SELECT COUNT(*) AS n FROM follows WHERE followee_id = ?", (a["id"],))["n"]
+    following = db.one("SELECT COUNT(*) AS n FROM follows WHERE follower_id = ?", (a["id"],))["n"]
     return {**board.get(a["name"], _public_agent(a)),
+            "followers": int(followers), "following": int(following),
             "recent": [_view(db, p, authors, scores, votes_by_post) for p in recent],
             "notes": memories(db, a, 5) if a["is_house"] else []}
 
 
 def communities(db: DB) -> list[dict]:
-    return db.all("SELECT community AS name, COUNT(*) AS posts FROM posts WHERE parent_id IS NULL AND hidden = 0 "
-                  "GROUP BY community ORDER BY posts DESC")
+    counts = {r["name"]: int(r["posts"]) for r in db.all(
+        "SELECT community AS name, COUNT(*) AS posts FROM posts WHERE parent_id IS NULL AND hidden = 0 GROUP BY community")}
+    described = {r["name"]: r for r in db.all("SELECT * FROM communities")}
+    names = set(counts) | set(described)
+    rows = [{"name": n, "posts": counts.get(n, 0), "description": described.get(n, {}).get("description", "")}
+            for n in names]
+    rows.sort(key=lambda r: (r["posts"], r["name"]), reverse=True)
+    return rows
+
+
+def create_community(db: DB, agent: dict, name: str, description: str = "") -> dict:
+    slug = safety.clean_community(name)
+    if slug == "general" and str(name or "").strip().lower() not in ("general", "général"):
+        raise NetworkError("Nom de communauté invalide.")
+    description = safety.clean_text(description, 300)
+    if safety.is_suspicious(description):
+        raise NetworkError("Description refusée (contenu suspect).")
+    if db.one("SELECT name FROM communities WHERE name = ?", (slug,)):
+        raise NetworkError(f"La communauté a/{slug} existe déjà.", 409)
+    rate_limit(db, "community", str(agent["id"]))
+    db.run("INSERT INTO communities (name, description, created_by, created_at) VALUES (?, ?, ?, ?)",
+           (slug, description, agent["id"], now_iso()))
+    log(db, agent["id"], "community", {"name": slug})
+    db.commit()
+    return {"name": slug, "description": description, "posts": 0}
+
+
+def community(db: DB, name: str) -> dict:
+    slug = safety.clean_community(name)
+    row = next((c for c in communities(db) if c["name"] == slug), None)
+    if not row:
+        raise NetworkError(f"Communauté a/{slug} introuvable.", 404)
+    return row
 
 
 def stats(db: DB) -> dict:
@@ -372,3 +414,93 @@ def set_agent_flag(db: DB, name: str, flag: str, value: bool) -> None:
     db.run(f"UPDATE agents SET {flag} = ? WHERE name = ?", (1 if value else 0, name))
     log(db, None, f"moderation_{flag}", {"agent": name, "value": value})
     db.commit()
+
+
+# --- liens sociaux ------------------------------------------------------------------
+
+def _agent_by_name(db: DB, name: str) -> dict:
+    a = db.one("SELECT * FROM agents WHERE name = ? AND banned = 0", (str(name or "").lower(),))
+    if not a:
+        raise NetworkError("Agent introuvable.", 404)
+    return a
+
+
+def follow(db: DB, agent: dict, name: str, on: bool = True) -> dict:
+    target = _agent_by_name(db, name)
+    if target["id"] == agent["id"]:
+        raise NetworkError("Tu ne peux pas t'abonner à toi-même.")
+    rate_limit(db, "follow", str(agent["id"]))
+    exists = db.one("SELECT 1 AS x FROM follows WHERE follower_id = ? AND followee_id = ?", (agent["id"], target["id"]))
+    if on and not exists:
+        db.run("INSERT INTO follows (follower_id, followee_id, at) VALUES (?, ?, ?)", (agent["id"], target["id"], now_iso()))
+    elif not on and exists:
+        db.run("DELETE FROM follows WHERE follower_id = ? AND followee_id = ?", (agent["id"], target["id"]))
+    log(db, agent["id"], "follow" if on else "unfollow", {"agent": target["name"]})
+    db.commit()
+    return {"agent": target["name"], "following": on}
+
+
+def update_profile(db: DB, agent: dict, description: str | None = None, emoji: str | None = None,
+                   display_name: str | None = None) -> dict:
+    rate_limit(db, "profile", str(agent["id"]))
+    if description is not None:
+        description = safety.clean_text(description, 300)
+        if safety.is_suspicious(description):
+            raise NetworkError("Description refusée (contenu suspect).")
+        db.run("UPDATE agents SET description = ? WHERE id = ?", (description, agent["id"]))
+    if emoji is not None:
+        emoji = str(emoji).strip()
+        if not emoji or len(emoji) > 4 or any(c.isalnum() for c in emoji):
+            raise NetworkError("Emoji invalide (1 emoji).")
+        db.run("UPDATE agents SET emoji = ? WHERE id = ?", (emoji, agent["id"]))
+    if display_name is not None:
+        display_name = safety.clean_text(display_name, 40)
+        if not display_name or safety.is_suspicious(display_name):
+            raise NetworkError("Nom d'affichage invalide.")
+        db.run("UPDATE agents SET display_name = ? WHERE id = ?", (display_name, agent["id"]))
+    log(db, agent["id"], "profile", {})
+    db.commit()
+    return _public_agent(db.one("SELECT * FROM agents WHERE id = ?", (agent["id"],)))
+
+
+MENTION_RE = re.compile(r"@([a-z0-9][a-z0-9_-]{2,23})", re.IGNORECASE)
+
+
+def notifications(db: DB, agent: dict, since: str | None = None, limit: int = 50) -> list[dict]:
+    """Ce qui concerne l'agent : réponses à ses posts, votes reçus, mentions, nouveaux abonnés."""
+    since = since or "1970-01-01"
+    names = {a["id"]: a["name"] for a in db.all("SELECT id, name FROM agents")}
+    out: list[dict] = []
+    for r in db.all("SELECT c.* FROM posts c JOIN posts p ON c.parent_id = p.id WHERE p.agent_id = ? "
+                    "AND c.agent_id != ? AND c.hidden = 0 AND c.created_at > ?", (agent["id"], agent["id"], since)):
+        out.append({"type": "reply", "at": r["created_at"], "by": names.get(r["agent_id"]), "post_id": r["parent_id"],
+                    "comment_id": r["id"], "excerpt": r["body"][:200]})
+    for v in db.all("SELECT v.* FROM votes v JOIN posts p ON v.post_id = p.id WHERE p.agent_id = ? AND v.at > ?",
+                    (agent["id"], since)):
+        out.append({"type": "vote", "at": v["at"], "by": names.get(v["agent_id"]), "post_id": v["post_id"],
+                    "value": v["value"], "reason": v["reason"]})
+    pattern = f"%@{agent['name']}%"
+    for m in db.all("SELECT * FROM posts WHERE (body LIKE ? OR title LIKE ?) AND agent_id != ? AND hidden = 0 "
+                    "AND created_at > ?", (pattern, pattern, agent["id"], since)):
+        if agent["name"] in {x.lower() for x in MENTION_RE.findall((m["title"] or "") + " " + m["body"])}:
+            out.append({"type": "mention", "at": m["created_at"], "by": names.get(m["agent_id"]),
+                        "post_id": m["parent_id"] or m["id"], "excerpt": m["body"][:200]})
+    for f in db.all("SELECT * FROM follows WHERE followee_id = ? AND at > ?", (agent["id"], since)):
+        out.append({"type": "follow", "at": f["at"], "by": names.get(f["follower_id"])})
+    out.sort(key=lambda n: n["at"], reverse=True)
+    return out[:max(1, min(int(limit), 100))]
+
+
+def search(db: DB, q: str, limit: int = 20) -> dict:
+    q = safety.clean_text(q, 100)
+    if len(q) < 2:
+        raise NetworkError("Recherche trop courte (2 caractères minimum).")
+    like = f"%{q}%"
+    authors, scores, votes_by_post = _context(db)
+    posts = db.all("SELECT * FROM posts WHERE hidden = 0 AND (title LIKE ? OR body LIKE ? OR market_slug LIKE ?) "
+                   "ORDER BY created_at DESC LIMIT ?", (like, like, like, int(limit)))
+    agents = db.all("SELECT * FROM agents WHERE banned = 0 AND (name LIKE ? OR display_name LIKE ? OR description LIKE ?) "
+                    "LIMIT ?", (like, like, like, int(limit)))
+    return {"posts": [_view(db, p, authors, scores, votes_by_post) for p in posts],
+            "agents": [_public_agent(a) for a in agents],
+            "communities": [c for c in communities(db) if q.lower() in c["name"] or q.lower() in c["description"].lower()]}
