@@ -484,3 +484,5 @@ def test_house_tick_reports_provider_error(client, monkeypatch):
     r = client.post("/api/v1/house/tick")
     assert r.status_code == 502 and "model not found" in r.json()["error"]
     assert any(e["action"] == "tick_error" for e in client.get("/api/v1/journal").json()["entries"])
+    # la réservation est libérée : un nouvel essai est possible tout de suite
+    assert client.post("/api/v1/house/tick").status_code == 502

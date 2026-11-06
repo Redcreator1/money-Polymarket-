@@ -387,6 +387,9 @@ def house_tick(db: DB = Depends(get_db)):
         db.rollback()
         detail = f"{type(exc).__name__}: {str(exc)[:400]}"
         try:
+            # Un tour raté ne compte pas : on libère la réservation pour pouvoir réessayer.
+            db.run("DELETE FROM audit WHERE id IN (SELECT id FROM audit WHERE action IN "
+                   "('house_tick', 'house_tick_agent') ORDER BY id DESC LIMIT 2)")
             service.log(db, None, "tick_error", {"agent": chosen["id"], "gateway": gateway, "error": detail})
             db.commit()
         except Exception:
