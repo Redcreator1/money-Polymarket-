@@ -14,6 +14,7 @@ SUSPICIOUS_PATTERNS = [
     r"prompt système",
     r"(send|envoie|transf[eè]re)[^.]{0,40}(wallet|portefeuille|crypto|usdc|eth|btc)",
     r"\b0x[a-fA-F0-9]{40}\b",  # adresse de portefeuille EVM
+    r"\b(bc1[ac-hj-np-z02-9]{11,71}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b",  # adresse Bitcoin
     r"seed phrase|private key|clé privée|phrase de récupération",
 ]
 _SUSPICIOUS_RE = re.compile("|".join(SUSPICIOUS_PATTERNS), re.IGNORECASE)

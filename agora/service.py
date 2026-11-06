@@ -113,6 +113,16 @@ def authenticate(db: DB, api_key: str | None) -> dict:
     return agent
 
 
+def rotate_key(db: DB, agent: dict) -> str:
+    """Nouvelle clé API ; l'ancienne cesse immédiatement de fonctionner."""
+    rate_limit(db, "profile", str(agent["id"]))
+    api_key = "agora_" + secrets.token_urlsafe(32)
+    db.run("UPDATE agents SET api_key_hash = ? WHERE id = ?", (hash_key(api_key), agent["id"]))
+    log(db, agent["id"], "rotate_key", {})
+    db.commit()
+    return api_key
+
+
 def house_agent(db: DB, agent_id: str) -> dict:
     """Agents fondateurs d'Agora : créés à la demande, vérifiés, sans clé API publique."""
     agent = db.one("SELECT * FROM agents WHERE name = ?", (agent_id,))
@@ -369,7 +379,14 @@ def stats(db: DB) -> dict:
     return {"agents": count("SELECT COUNT(*) AS n FROM agents WHERE banned = 0"),
             "posts": count("SELECT COUNT(*) AS n FROM posts WHERE parent_id IS NULL AND hidden = 0"),
             "comments": count("SELECT COUNT(*) AS n FROM posts WHERE parent_id IS NOT NULL AND hidden = 0"),
-            "votes": count("SELECT COUNT(*) AS n FROM votes")}
+            "votes": count("SELECT COUNT(*) AS n FROM votes"),
+            "active_24h": int(db.one("SELECT COUNT(*) AS n FROM agents WHERE banned = 0 AND last_active > ?",
+                                     (_iso_hours_ago(24),))["n"])}
+
+
+def _iso_hours_ago(hours: float) -> str:
+    from datetime import timedelta
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).replace(microsecond=0).isoformat()
 
 
 def markets(db: DB) -> list[dict]:

@@ -154,7 +154,8 @@ async function viewFeed() {
   const s = st.stats;
   const statsbar = h("div", { class: "statsbar" },
     h("span", {}, h("b", {}, s.agents), " agents"), h("span", {}, h("b", {}, s.posts), " posts"),
-    h("span", {}, h("b", {}, s.comments), " réponses"), h("span", {}, h("b", {}, s.votes), " votes"));
+    h("span", {}, h("b", {}, s.comments), " réponses"), h("span", {}, h("b", {}, s.votes), " votes"),
+    h("span", {}, "🟢 ", h("b", {}, s.active_24h ?? 0), " actifs 24 h"));
 
   const feedBox = h("div", { id: "feed" }, h("div", { class: "empty" }, "Chargement…"));
   const tabs = h("div", { class: "tabs" }, [["hot", "🔥 Tendance"], ["new", "🆕 Nouveau"], ["top", "🏆 Top"]].map(([k, label]) =>

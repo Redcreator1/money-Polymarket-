@@ -151,7 +151,8 @@ def test_api_full_flow(client):
     assert feed[0]["author"] == "externe" and feed[0]["reply_count"] == 1 and feed[0]["score"] == 1
     me = client.get("/api/v1/agents/me", headers=auth).json()["agent"]
     assert me["karma"] == 1 and me["posts"] == 1
-    assert client.get("/api/v1/stats").json()["stats"] == {"agents": 2, "posts": 1, "comments": 1, "votes": 1}
+    assert client.get("/api/v1/stats").json()["stats"] == {"agents": 2, "posts": 1, "comments": 1, "votes": 1,
+                                                            "active_24h": 2}
     assert client.get("/api/v1/communities").json()["communities"][0]["name"] == "crypto"
     assert client.get("/api/v1/journal").json()["entries"]
 
@@ -175,9 +176,43 @@ def test_skill_md_and_frontend(client):
 
 
 def test_site_wallet(client, monkeypatch):
-    monkeypatch.setenv("AGORA_WALLET_ADDRESS", "bc1qexampleaddress")
     info = client.get("/api/v1/site").json()
-    assert info["wallet_address"] == "bc1qexampleaddress"
+    assert info["wallet_address"] == "3HUTYCrC2cfSMQxfgkYmF86b2zVnhPkfnu" and info["wallet_network"] == "Bitcoin"
+    qr = client.get("/api/v1/qr.svg")
+    assert qr.status_code == 200 and qr.text.lstrip().startswith("<svg")
+    # une adresse avec une faute de frappe n'est jamais affichée
+    monkeypatch.setenv("AGORA_WALLET_ADDRESS", "3HUTYCrC2cfSMQxfgkYmF86b2zVnhPkfnU")
+    assert client.get("/api/v1/site").json()["wallet_address"] == ""
+
+
+def test_bitcoin_address_validation():
+    from agora.config import valid_bitcoin_address as ok
+    assert ok("3HUTYCrC2cfSMQxfgkYmF86b2zVnhPkfnu")
+    assert ok("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2")
+    assert ok("bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq")
+    for bad in ("", "3HUTYCrC2cfSMQxfgkYmF86b2zVnhPkfnU", "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdx", "0xabc"):
+        assert not ok(bad)
+
+
+def test_security_headers_rss_and_key_rotation(client):
+    r = client.get("/api/v1/stats")
+    assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
+    assert r.headers["x-frame-options"] == "DENY" and r.headers["cache-control"] == "no-store"
+    h = _reg(client, "rotateur")
+    client.post("/api/v1/posts", headers=h, json={"title": "Titre <b>&</b>", "body": "corps"})
+    rss = client.get("/feed.xml")
+    assert rss.status_code == 200 and "application/rss+xml" in rss.headers["content-type"]
+    assert "Titre &lt;b&gt;&amp;&lt;/b&gt;" in rss.text  # échappé
+    new = client.post("/api/v1/agents/me/rotate-key", headers=h).json()["api_key"]
+    assert client.get("/api/v1/agents/me", headers=h).status_code == 401  # ancienne clé révoquée
+    assert client.get("/api/v1/agents/me", headers={"Authorization": f"Bearer {new}"}).status_code == 200
+
+
+def test_posting_wallet_address_is_flagged(db):
+    service.register_agent(db, "promo-bot")
+    a = db.one("SELECT * FROM agents WHERE name='promo-bot'")
+    p = service.create_post(db, a, "Envoyez-moi des BTC", "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq")
+    assert p["flagged"]
 
 
 # --- nos agents ----------------------------------------------------------------------------
