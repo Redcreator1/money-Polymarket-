@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 
 from . import config, service
 from .agents import AGENTS
+
+AGENTS_BY_ID = {a["id"]: a for a in AGENTS}
 from .db import DB
 from .service import now_iso
 from .tools import ToolError, ToolExecutor, all_tools
@@ -60,7 +62,19 @@ def _get(block, key, default=None):
     return getattr(block, key, default)
 
 
-def run_agent_turn(client, db: DB, agent: dict, markets) -> dict:
+def _create(client, gateway: bool, **kw):
+    if gateway:
+        # AI Gateway : API Messages standard, sans fonctions bêta.
+        return client.messages.create(model=config.GATEWAY_MODEL, tools=all_tools(gateway=True), **kw)
+    return client.beta.messages.create(
+        model=config.MODEL, tools=all_tools(), thinking={"type": "adaptive"},
+        output_config={"effort": config.EFFORT}, betas=["server-side-fallback-2026-07-01"], fallbacks="default", **kw)
+
+
+def run_agent_turn(client, db: DB, agent: dict, markets, gateway: bool = False,
+                   deadline: float | None = None) -> dict:
+    import time as _time
+
     agent_row = service.house_agent(db, agent["id"])
     executor = ToolExecutor(db, agent_row, markets)
     messages: list = [{"role": "user", "content": turn_prompt(db, agent_row)}]
@@ -70,18 +84,12 @@ def run_agent_turn(client, db: DB, agent: dict, markets) -> dict:
     stop = None
 
     while steps < config.MAX_STEPS_PER_TURN:
+        if deadline is not None and _time.monotonic() > deadline:
+            stop = "deadline"
+            break
         steps += 1
-        response = client.beta.messages.create(
-            model=config.MODEL,
-            max_tokens=config.MAX_TOKENS,
-            system=system_prompt(agent),
-            messages=messages,
-            tools=all_tools(),
-            thinking={"type": "adaptive"},
-            output_config={"effort": config.EFFORT},
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-        )
+        response = _create(client, gateway, max_tokens=config.MAX_TOKENS, system=system_prompt(agent),
+                            messages=messages)
         u = _get(response, "usage")
         if u is not None:
             usage["input_tokens"] += _get(u, "input_tokens", 0) or 0

@@ -37,6 +37,15 @@ SECURITY_HEADERS = {
 
 
 @app.middleware("http")
+async def _vercel_oidc(request: Request, call_next):
+    # Jeton OIDC fourni par Vercel à chaque requête : il remplace les clés Blob et Anthropic.
+    token = request.headers.get("x-vercel-oidc-token")
+    if token:
+        os.environ["VERCEL_OIDC_TOKEN"] = token
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def _security_headers(request: Request, call_next):
     response = await call_next(request)
     for k, v in SECURITY_HEADERS.items():
@@ -320,6 +329,39 @@ def qr():
     buf = io.BytesIO()
     segno.make(data, error="m").save(buf, kind="svg", scale=4, border=2, xmldecl=False, dark="#000", light="#fff")
     return Response(buf.getvalue(), media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=3600"})
+
+
+# --- tours automatiques des agents fondateurs ---------------------------------------------
+
+def _llm_client():
+    """Clé Anthropic si elle existe, sinon AI Gateway avec le jeton OIDC du projet Vercel."""
+    import anthropic
+
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return anthropic.Anthropic(), False
+    key = os.environ.get("AI_GATEWAY_API_KEY") or os.environ.get("VERCEL_OIDC_TOKEN")
+    if not key:
+        raise NetworkError("Aucun accès au modèle (ni clé, ni jeton OIDC Vercel).", 503)
+    return anthropic.Anthropic(api_key=key, base_url=config.GATEWAY_URL), True
+
+
+@app.api_route("/api/v1/house/tick", methods=["GET", "POST"])
+def house_tick(db: DB = Depends(get_db)):
+    """Fait jouer UN agent fondateur. Public mais sans danger : au plus un tour toutes les 25 min."""
+    import time
+
+    from .polymarket import PolymarketClient
+    from .runner import AGENTS_BY_ID, run_agent_turn
+
+    chosen = _retry(lambda: service.claim_tick(db, config.TICK_MINUTES))
+    if chosen is None:
+        return {"success": True, "skipped": "Un agent a déjà joué il y a moins de "
+                                            f"{config.TICK_MINUTES} minutes."}
+    client, gateway = _llm_client()
+    record = run_agent_turn(client, db, AGENTS_BY_ID[chosen["id"]], PolymarketClient(), gateway=gateway,
+                            deadline=time.monotonic() + config.TICK_BUDGET_SECONDS)
+    return {"success": True, "agent": chosen["id"], "steps": record["steps"],
+            "stop_reason": record["stop_reason"], "summary": record["summary"][:500]}
 
 
 # --- modération ------------------------------------------------------------------------

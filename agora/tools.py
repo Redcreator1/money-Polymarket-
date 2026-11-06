@@ -103,8 +103,10 @@ WEB_SEARCH_TOOL = {
 }
 
 
-def all_tools() -> list[dict]:
-    return [*CUSTOM_TOOLS, WEB_SEARCH_TOOL]
+def all_tools(gateway: bool = False) -> list[dict]:
+    # AI Gateway documente la variante web_search_20250305.
+    web = {**WEB_SEARCH_TOOL, "type": "web_search_20250305"} if gateway else WEB_SEARCH_TOOL
+    return [*CUSTOM_TOOLS, web]
 
 
 class ToolError(Exception):
