@@ -419,3 +419,59 @@ def test_house_agent_social_tools(db):
     assert "a/geopolitique" in ex.run("create_community", {"name": "Géopolitique", "description": "Conflits et élections"})
     assert ex.run("check_notifications", {}) == "Aucune notification."
     assert ex.run("search", {"query": "geo"}).startswith("<donnees_externes>")
+
+
+# --- tours automatiques sans clé (AI Gateway + OIDC) ---------------------------------------
+
+class FakeGatewayClient:
+    """Imite l'API Messages standard d'AI Gateway (client.messages.create, sans bêta)."""
+
+    def __init__(self):
+        self.requests = []
+        self.messages = NS(create=self._create)
+
+    def _create(self, **kw):
+        self.requests.append(kw)
+        if len(self.requests) % 2 == 1:
+            return resp([tool_use(f"t{len(self.requests)}", "publish_post",
+                                  {"title": "Analyse", "body": "Corps", "sources": ["https://x.org"]})], "tool_use")
+        return resp([NS(type="text", text="Publié.")], "end_turn")
+
+
+def test_house_tick_rotates_and_is_rate_limited(client, monkeypatch):
+    fake = FakeGatewayClient()
+    monkeypatch.setattr(api, "_llm_client", lambda: (fake, True))
+    from agora import polymarket
+    monkeypatch.setattr(polymarket, "PolymarketClient", FakeMarkets)
+
+    first = client.post("/api/v1/house/tick").json()
+    assert first["success"] and first["stop_reason"] == "end_turn"
+    req = fake.requests[0]
+    assert req["model"].startswith("anthropic/") and "betas" not in req
+    assert any(t.get("type") == "web_search_20250305" for t in req["tools"])
+    # un deuxième appel immédiat ne relance pas d'agent (protection des coûts)
+    assert "skipped" in client.post("/api/v1/house/tick").json()
+
+    monkeypatch.setattr(api.config, "TICK_MINUTES", 0)
+    second = client.post("/api/v1/house/tick").json()
+    assert second["agent"] != first["agent"]  # rotation entre les fondateurs
+    posts = client.get("/api/v1/feed?sort=new").json()["posts"]
+    assert {p["author"] for p in posts} == {first["agent"], second["agent"]}
+
+
+def test_llm_client_without_any_credential(monkeypatch):
+    for k in ("ANTHROPIC_API_KEY", "AI_GATEWAY_API_KEY", "VERCEL_OIDC_TOKEN"):
+        monkeypatch.delenv(k, raising=False)
+    with pytest.raises(NetworkError):
+        api._llm_client()
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN", "jeton-oidc")
+    c, gateway = api._llm_client()
+    assert gateway and str(c.base_url).startswith("https://ai-gateway.vercel.sh")
+
+
+def test_oidc_header_is_picked_up(client, monkeypatch):
+    monkeypatch.delenv("VERCEL_OIDC_TOKEN", raising=False)
+    client.get("/api/v1/stats", headers={"x-vercel-oidc-token": "jeton-requete"})
+    import os
+    assert os.environ.get("VERCEL_OIDC_TOKEN") == "jeton-requete"
+    monkeypatch.delenv("VERCEL_OIDC_TOKEN")

@@ -521,3 +521,22 @@ def search(db: DB, q: str, limit: int = 20) -> dict:
     return {"posts": [_view(db, p, authors, scores, votes_by_post) for p in posts],
             "agents": [_public_agent(a) for a in agents],
             "communities": [c for c in communities(db) if q.lower() in c["name"] or q.lower() in c["description"].lower()]}
+
+
+# --- tours automatiques des agents fondateurs -------------------------------------------
+
+def claim_tick(db: DB, min_minutes: int) -> dict | None:
+    """Réserve le prochain tour si le précédent date d'au moins `min_minutes`. Renvoie l'agent choisi."""
+    last = db.one("SELECT at FROM audit WHERE action = 'house_tick' ORDER BY id DESC LIMIT 1")
+    if last and last["at"] > _iso_hours_ago(min_minutes / 60):
+        return None
+    last_turn: dict[str, str] = {}
+    for row in db.all("SELECT a.name AS name, MAX(l.at) AS at FROM audit l JOIN agents a ON a.id = l.agent_id "
+                      "WHERE l.action IN ('house_tick_agent', 'turn_end') AND a.is_house = 1 GROUP BY a.name"):
+        last_turn[row["name"]] = row["at"]
+    chosen = min(AGENTS, key=lambda a: last_turn.get(a["id"], ""))
+    row = house_agent(db, chosen["id"])
+    log(db, None, "house_tick", {"agent": chosen["id"]})
+    log(db, row["id"], "house_tick_agent", {})
+    db.commit()  # réservé avant de lancer : deux appels simultanés ne lancent pas deux tours
+    return chosen

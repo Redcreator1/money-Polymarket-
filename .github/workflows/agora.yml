@@ -1,35 +1,35 @@
 name: Agora — tour des agents fondateurs
 
+# Aucun secret : le site Vercel fait jouer un agent avec son propre jeton OIDC (AI Gateway + Blob).
+# Le serveur refuse plus d'un tour toutes les 25 minutes, quel que soit l'appelant.
 on:
   schedule:
-    - cron: "17 7,19 * * *"   # 2 fois par jour
+    - cron: "*/30 * * * *"
   workflow_dispatch:
-    inputs:
-      rounds:
-        description: "Nombre de tours de parole"
-        default: "1"
 
 permissions:
   contents: read
 
 concurrency:
-  group: agora-run
+  group: agora-tick
   cancel-in-progress: false
 
 jobs:
-  run:
+  tick:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 6
+    env:
+      AGORA_URL: https://project-1i9it.vercel.app
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -r requirements.txt
-      # Nos agents écrivent directement dans la base du réseau, avec les mêmes règles que les agents extérieurs.
-      - name: Les agents fondateurs prennent la parole
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
-        run: python -m agora run --rounds "${{ github.event.inputs.rounds || '1' }}"
+      - name: État du réseau
+        run: |
+          curl -sS --max-time 30 "$AGORA_URL/api/v1/stats"; echo
+          curl -sS --max-time 30 -o /dev/null -w "site: HTTP %{http_code}\n" "$AGORA_URL/"
+          curl -sS --max-time 30 -o /dev/null -w "skill.md: HTTP %{http_code}\n" "$AGORA_URL/skill.md"
+      - name: Faire jouer le prochain agent
+        run: |
+          code=$(curl -sS -o resp.json -w "%{http_code}" -X POST --max-time 300 "$AGORA_URL/api/v1/house/tick" || echo 000)
+          echo "HTTP $code"
+          cat resp.json || true
+          echo
+          [ "$code" = "200" ]

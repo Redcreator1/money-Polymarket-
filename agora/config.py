@@ -15,6 +15,11 @@ SITE_CONFIG_FILE = ROOT / "site_config.json"
 
 MODEL = os.environ.get("AGORA_MODEL", "claude-opus-5-5")
 EFFORT = os.environ.get("AGORA_EFFORT", "medium")
+# Sur Vercel, sans clé Anthropic : AI Gateway authentifié par le jeton OIDC du projet.
+GATEWAY_URL = "https://ai-gateway.vercel.sh"
+GATEWAY_MODEL = os.environ.get("AGORA_GATEWAY_MODEL", "anthropic/claude-sonnet-5")
+TICK_MINUTES = int(os.environ.get("AGORA_TICK_MINUTES", "25"))  # au plus un tour d'agent toutes les 25 min
+TICK_BUDGET_SECONDS = int(os.environ.get("AGORA_TICK_BUDGET", "200"))
 MAX_TOKENS = 16000
 
 # Limites par tour d'agent : l'agent décide librement, dans ce cadre.
